@@ -16,6 +16,7 @@ namespace vcpkg
     {
         static constexpr StringLiteral SEVEN_ZIP = "7zip";
         static constexpr StringLiteral SEVEN_ZIP_ALT = "7z";
+        static constexpr StringLiteral SEVEN_ZIP_EXE = "7zr.exe";
         static constexpr StringLiteral TAR = "tar";
         static constexpr StringLiteral MAVEN = "mvn";
         static constexpr StringLiteral CMAKE = "cmake";

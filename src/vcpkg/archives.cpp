@@ -106,12 +106,15 @@ namespace
         static bool recursion_limiter_sevenzip = false;
         Checks::check_exit(VCPKG_LINE_INFO, !recursion_limiter_sevenzip);
         recursion_limiter_sevenzip = true;
+        msg::write_unlocalized_text_to_stdout("Using 7-Zip to extract " + archive.native() + " to " + to_path.native() +
+                                              '\n');
+
         const auto maybe_output = flatten(cmd_execute_and_capture_output(Command{seven_zip}
                                                                              .string_arg("x")
                                                                              .string_arg(archive)
                                                                              .string_arg(fmt::format("-o{}", to_path))
                                                                              .string_arg("-y")),
-                                          Tools::SEVEN_ZIP);
+                                          Tools::SEVEN_ZIP_EXE);
         if (!maybe_output)
         {
             Checks::msg_exit_with_message(
@@ -175,10 +178,10 @@ namespace vcpkg
             case ExtractionType::Nupkg: win32_extract_nupkg(tools, status_sink, archive, to_path); break;
             case ExtractionType::Msi: win32_extract_msi(archive, to_path); break;
             case ExtractionType::Zip:
-                extract_tar_cmake(tools.get_tool_path(Tools::CMAKE, status_sink), archive, to_path);
+                win32_extract_with_seven_zip(tools.get_tool_path(Tools::SEVEN_ZIP_EXE, status_sink), archive, to_path);
                 break;
             case ExtractionType::Tar:
-                extract_tar(tools.get_tool_path(Tools::TAR, status_sink), archive, to_path);
+                win32_extract_with_seven_zip(tools.get_tool_path(Tools::SEVEN_ZIP_EXE, status_sink), archive, to_path);
                 break;
             case ExtractionType::Exe:
                 const Path filename = archive.filename();
@@ -277,27 +280,7 @@ namespace vcpkg
 
         fs.remove_all(to_path_partial, VCPKG_LINE_INFO);
         fs.create_directories(to_path_partial, VCPKG_LINE_INFO);
-        const auto tar_path = get_system32().value_or_exit(VCPKG_LINE_INFO) / "tar.exe";
-        if (fs.exists(tar_path, IgnoreErrors{}))
-        {
-            // On Windows 10, tar.exe is in the box.
-            extract_tar(tar_path, archive, to_path_partial);
-        }
-        else
-        {
-            auto maybe_cmake_tool = find_system_cmake(fs);
-            if (maybe_cmake_tool)
-            {
-                // If the user has a CMake version installed we can use that to unpack.
-                extract_tar_cmake(maybe_cmake_tool.value_or_exit(VCPKG_LINE_INFO), archive, to_path_partial);
-            }
-            else
-            {
-                // On Windows <10, we attempt to use msiexec to unpack 7zip.
-                win32_extract_with_seven_zip(
-                    tools.get_tool_path(Tools::SEVEN_ZIP_MSI, status_sink), archive, to_path_partial);
-            }
-        }
+        win32_extract_with_seven_zip(tools.get_tool_path(Tools::SEVEN_ZIP_EXE, status_sink), archive, to_path_partial);
         fs.rename_with_retry(to_path_partial, to_path, VCPKG_LINE_INFO);
     }
 #endif
@@ -371,7 +354,7 @@ namespace vcpkg
     {
         ZipTool ret;
 #if defined(_WIN32)
-        ret.seven_zip = cache.get_tool_path(Tools::SEVEN_ZIP, status_sink);
+        ret.seven_zip = cache.get_tool_path(Tools::SEVEN_ZIP_EXE, status_sink);
 #endif
         // Unused on non-Windows
         (void)cache;
