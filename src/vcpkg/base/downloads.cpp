@@ -987,22 +987,19 @@ namespace vcpkg
                                                    std::vector<LocalizedString>& errors) const
     {
         if (!m_config.m_block_origin) {
-            if(urls.size() != 0) 
+            auto maybe_url = try_download_file(fs, urls, headers, download_path, sha512, m_config.m_secrets, errors, progress_sink);
+            if (auto url = maybe_url.get()) 
             {
-                auto maybe_url = try_download_file(fs, urls, headers, download_path, sha512, m_config.m_secrets, errors, progress_sink);
-                if (auto url = maybe_url.get()) 
+                if (auto hash = sha512.get())
                 {
-                    if (auto hash = sha512.get())
+                    auto maybe_push = put_file_to_mirror(fs, download_path, *hash);
+                    if (!maybe_push) 
                     {
-                        auto maybe_push = put_file_to_mirror(fs, download_path, *hash);
-                        if (!maybe_push) 
-                        {
-                            msg::println_warning(msgFailedToStoreBackToMirror, msg::path = download_path.filename(), msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets));
-                            msg::println(msg::format_error(msgFailedToStoreBackToMirror, msg::path = download_path.filename(), msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets)));
-                        }
+                        msg::println_warning(msgFailedToStoreBackToMirror, msg::path = download_path.filename(), msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets));
+                        msg::println(msg::format_error(msgFailedToStoreBackToMirror, msg::path = download_path.filename(), msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets)));
                     }
-                    return *url;
                 }
+                return *url;
             }
         }
        
