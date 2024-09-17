@@ -887,6 +887,129 @@ namespace vcpkg
 
     bool DownloadManager::asset_cache_configured() const { return m_config.m_read_url_template.has_value(); }
 
+    static std::string handleNoUrlsProvided(const Optional<std::string>& sha512)
+    {
+        if (auto hash = sha512.get()) 
+        {
+            msg::println(msg::format_error(msgNoUrlsAndHashSpecified, msg::sha = *hash));
+        } else 
+        {
+            msg::println(msg::format_error(msgNoUrlsAndNoHashSpecified));
+        }
+        Checks::exit_fail(VCPKG_LINE_INFO);
+        return "";
+    }
+
+    std::string DownloadManager::attemptAssetCacheDownload(const Filesystem& fs,
+                                                       const std::string& hash,
+                                                       const Path& download_path,
+                                                       MessageSink& progress_sink,
+                                                       std::vector<LocalizedString>& errors) const
+    {
+        if (auto read_template = m_config.m_read_url_template.get()) {
+            auto read_url = Strings::replace_all(*read_template, "<SHA>", hash);
+            if (try_download_file(fs, read_url, m_config.m_read_headers, download_path, Optional<std::string>(hash), m_config.m_secrets, errors, progress_sink)) 
+            {
+                msg::println(msgAssetCacheHit, msg::path = download_path.filename(), msg::url = replace_secrets(read_url, m_config.m_secrets));
+                return read_url;
+            }
+            else if (asset_cache_configured() && get_block_origin())
+            {
+                msg::println(msgAssetCacheMissBlockOrigin, msg::path = download_path.filename());
+            }
+            else
+            {
+                msg::println(msgAssetCacheMiss, msg::url = replace_secrets(read_url, m_config.m_secrets));
+            }
+        }
+        return "";
+    }
+
+    std::string DownloadManager::executeDownloadScript(const Filesystem& fs,
+                                                   const View<std::string>& urls,
+                                                   const std::string& hash,
+                                                   const Path& download_path,
+                                                   std::vector<LocalizedString>& errors) const
+    {
+        if (auto script = m_config.m_script.get()) 
+        {
+            const auto download_path_part_path = download_path + fmt::format(".{}.part", get_process_id());
+            const auto escaped_url = Command(urls[0]).extract();
+            const auto escaped_sha512 = Command(hash).extract();
+            const auto escaped_dpath = Command(download_path_part_path).extract();
+
+            Command cmd;
+            cmd.raw_arg(api_stable_format(*script, [&](std::string& out, StringView key) {
+                        if (key == "url") 
+                        {
+                            Strings::append(out, escaped_url);
+                        } 
+                        else if (key == "sha512") 
+                        {
+                            Strings::append(out, escaped_sha512);
+                        } 
+                        else if (key == "dst") 
+                        {
+                            Strings::append(out, escaped_dpath);
+                        }
+                    }).value_or_exit(VCPKG_LINE_INFO));
+
+            RedirectedProcessLaunchSettings settings;
+            settings.environment = get_clean_environment();
+            settings.echo_in_debug = EchoInDebug::Show;
+            auto maybe_res = flatten(cmd_execute_and_capture_output(cmd, settings), "<mirror-script>");
+            
+            if (maybe_res)
+            {
+                auto maybe_success = try_verify_downloaded_file_hash(fs, "<mirror-script>", download_path_part_path, hash);
+
+                if (maybe_success)
+                {
+                    fs.rename(download_path_part_path, download_path, VCPKG_LINE_INFO);
+                    return urls[0];
+                }
+                errors.push_back(std::move(maybe_success).error());
+            }
+            else
+            {
+                errors.push_back(std::move(maybe_res).error());
+            }
+        }
+        return "";
+    }
+
+    std::string DownloadManager::handleOriginDownloads(const Filesystem& fs,
+                                                   View<std::string> urls,
+                                                   View<std::string> headers,
+                                                   const Path& download_path,
+                                                   const Optional<std::string>& sha512,
+                                                   MessageSink& progress_sink,
+                                                   std::vector<LocalizedString>& errors) const
+    {
+        if (!m_config.m_block_origin) {
+            if(urls.size() != 0) 
+            {
+                auto maybe_url = try_download_file(fs, urls, headers, download_path, sha512, m_config.m_secrets, errors, progress_sink);
+                if (auto url = maybe_url.get()) 
+                {
+                    if (auto hash = sha512.get())
+                    {
+                        auto maybe_push = put_file_to_mirror(fs, download_path, *hash);
+                        if (!maybe_push) 
+                        {
+                            msg::println_warning(msgFailedToStoreBackToMirror, msg::path = download_path.filename(), msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets));
+                            msg::println(msg::format_error(msgFailedToStoreBackToMirror, msg::path = download_path.filename(), msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets)));
+                        }
+                    }
+                    return *url;
+                }
+            }
+        }
+       
+        Checks::exit_fail(VCPKG_LINE_INFO);
+        return "";
+    }
+
     void DownloadManager::download_file(const Filesystem& fs,
                                         const std::string& url,
                                         View<std::string> headers,
@@ -904,122 +1027,32 @@ namespace vcpkg
                                                const Optional<std::string>& sha512,
                                                MessageSink& progress_sink) const
     {
-        std::vector<LocalizedString> errors;
-        if (urls.size() == 0)
+        if (urls.empty()) 
         {
-            if (auto hash = sha512.get())
-            {
-                errors.push_back(msg::format_error(msgNoUrlsAndHashSpecified, msg::sha = *hash));
-            }
-            else
-            {
-                errors.push_back(msg::format_error(msgNoUrlsAndNoHashSpecified));
-            }
+            return handleNoUrlsProvided(sha512);
         }
+
+        std::vector<LocalizedString> errors;
 
         if (auto hash = sha512.get())
         {
-            if (auto read_template = m_config.m_read_url_template.get())
+            std::string result = attemptAssetCacheDownload(fs, *hash, download_path, progress_sink, errors);
+            if (!result.empty())
             {
-                auto read_url = Strings::replace_all(*read_template, "<SHA>", *hash);
-                if (try_download_file(fs,
-                                      read_url,
-                                      m_config.m_read_headers,
-                                      download_path,
-                                      sha512,
-                                      m_config.m_secrets,
-                                      errors,
-                                      progress_sink))
-                {
-                    msg::println(msgAssetCacheHit,
-                                 msg::path = download_path.filename(),
-                                 msg::url = replace_secrets(read_url, m_config.m_secrets));
-                    return read_url;
-                }
+                return result;
             }
-            else if (auto script = m_config.m_script.get())
+
+            result = executeDownloadScript(fs, urls, *hash, download_path, errors);
+            if (!result.empty()) 
             {
-                if (urls.size() != 0)
-                {
-                    const auto download_path_part_path = download_path + fmt::format(".{}.part", get_process_id());
-                    const auto escaped_url = Command(urls[0]).extract();
-                    const auto escaped_sha512 = Command(*hash).extract();
-                    const auto escaped_dpath = Command(download_path_part_path).extract();
-                    Command cmd;
-                    cmd.raw_arg(api_stable_format(*script, [&](std::string& out, StringView key) {
-                                    if (key == "url")
-                                    {
-                                        Strings::append(out, escaped_url);
-                                    }
-                                    else if (key == "sha512")
-                                    {
-                                        Strings::append(out, escaped_sha512);
-                                    }
-                                    else if (key == "dst")
-                                    {
-                                        Strings::append(out, escaped_dpath);
-                                    }
-                                }).value_or_exit(VCPKG_LINE_INFO));
-
-                    RedirectedProcessLaunchSettings settings;
-                    settings.environment = get_clean_environment();
-                    settings.echo_in_debug = EchoInDebug::Show;
-                    auto maybe_res = flatten(cmd_execute_and_capture_output(cmd, settings), "<mirror-script>");
-                    if (maybe_res)
-                    {
-                        auto maybe_success =
-                            try_verify_downloaded_file_hash(fs, "<mirror-script>", download_path_part_path, *hash);
-                        if (maybe_success)
-                        {
-                            fs.rename(download_path_part_path, download_path, VCPKG_LINE_INFO);
-                            return urls[0];
-                        }
-
-                        errors.push_back(std::move(maybe_success).error());
-                    }
-                    else
-                    {
-                        errors.push_back(std::move(maybe_res).error());
-                    }
-                }
+                return result;
             }
-        }
 
-        if (!m_config.m_block_origin)
-        {
-            if (urls.size() != 0)
+            result = handleOriginDownloads(fs, urls, headers, download_path, sha512, progress_sink, errors);
+            if (!result.empty()) 
             {
-                auto maybe_url = try_download_file(
-                    fs, urls, headers, download_path, sha512, m_config.m_secrets, errors, progress_sink);
-                if (auto url = maybe_url.get())
-                {
-                    m_config.m_read_url_template.has_value() ? msg::println(msgAssetCacheMiss, msg::url = urls[0])
-                                                             : msg::println(msgDownloadingUrl, msg::url = urls[0]);
-
-                    if (auto hash = sha512.get())
-                    {
-                        auto maybe_push = put_file_to_mirror(fs, download_path, *hash);
-                        if (!maybe_push)
-                        {
-                            msg::println_warning(msgFailedToStoreBackToMirror,
-                                                 msg::path = download_path.filename(),
-                                                 msg::url = replace_secrets(download_path.c_str(), m_config.m_secrets));
-                            msg::println(maybe_push.error());
-                        }
-                    }
-
-                    return *url;
-                }
+                return result;
             }
-        }
-        // Asset cache is not configured and x-block-origin enabled
-        if (m_config.m_read_url_template.has_value())
-        {
-            msg::println(msgAssetCacheMissBlockOrigin, msg::path = download_path.filename());
-        }
-        else
-        {
-            msg::println_error(msgMissingAssetBlockOrigin, msg::path = download_path.filename());
         }
 
         for (LocalizedString& error : errors)

@@ -95,6 +95,26 @@ namespace vcpkg
         bool get_block_origin() const;
         bool asset_cache_configured() const;
 
+        std::string attemptAssetCacheDownload(const Filesystem& fs,
+                                              const std::string& hash,
+                                              const Path& download_path,
+                                              MessageSink& progress_sink,
+                                              std::vector<LocalizedString>& errors) const;
+                                              
+        std::string executeDownloadScript(const Filesystem& fs,
+                                          const View<std::string>& urls,
+                                          const std::string& hash,
+                                          const Path& download_path,
+                                          std::vector<LocalizedString>& errors) const;
+
+        std::string handleOriginDownloads(const Filesystem& fs,
+                                          View<std::string> urls,
+                                          View<std::string> headers,
+                                          const Path& download_path,
+                                          const Optional<std::string>& sha512,
+                                          MessageSink& progress_sink,
+                                          std::vector<LocalizedString>& errors) const;
+
     private:
         DownloadManagerConfig m_config;
     };
